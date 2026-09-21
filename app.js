@@ -159,10 +159,12 @@ el('calCount').addEventListener('click', runCount);
 function runCount() {
   if (!workerReady) { alert('The vision engine is still loading — try again in a moment.'); return; }
   if (pendingCount) return;
+  if (!calLine) { alert('Draw a line across one bead first.'); return; }
   pendingCount = true;
   el('spinner').hidden = false;
   const imageData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
-  worker.postMessage({ type: 'count', imageData, diameter }, [imageData.data.buffer]);
+  const line = { x1: calLine.x1, y1: calLine.y1, x2: calLine.x2, y2: calLine.y2 };
+  worker.postMessage({ type: 'count', imageData, line }, [imageData.data.buffer]);
 }
 
 const resCanvas = el('resCanvas');

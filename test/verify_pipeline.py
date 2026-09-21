@@ -1,77 +1,94 @@
-"""Mirror of cv-worker.js count() in Python/OpenCV, to validate accuracy
-against known-count fixtures before trusting the JS version.
+"""Mirror of cv-worker.js count() in Python/OpenCV, for validating the detector.
 
 Keep this in sync with cv-worker.js if the algorithm changes.
+
+Usage:
+    python3 test/verify_pipeline.py IMAGE x1 y1 x2 y2 [--annot out.png]
+where (x1,y1)-(x2,y2) is the calibration stroke across one bead.
 """
-import math
 import sys
 
 import cv2
 import numpy as np
 
+CHROMA_T = 20
+
 
 def size_odd(v):
     k = max(3, round(v))
-    if k % 2 == 0:
-        k += 1
-    return (k, k)
+    return k + 1 if k % 2 == 0 else k
 
 
-def border_mean(m):
-    h, w = m.shape
-    b = max(2, round(min(w, h) * 0.03))
-    strips = [m[0:b, :], m[h - b:h, :], m[:, 0:b], m[:, w - b:w]]
-    return sum(float(s.mean()) for s in strips) / len(strips)
-
-
-def count_beads(img_bgr, diameter):
-    d = max(4, diameter)
+def count_beads(img_bgr, line, annot_path=None):
+    x1, y1, x2, y2 = line
+    d = max(4.0, float(np.hypot(x2 - x1, y2 - y1)))
     radius = d / 2
-    single = math.pi * radius * radius
+    single = np.pi * radius * radius
 
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    rows, cols = lab.shape[:2]
 
-    _, binimg = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if border_mean(binimg) > 127:
-        binimg = cv2.bitwise_not(binimg)
+    # sample the INNER portion of the stroke (0.2..0.8) so endpoints that
+    # overshoot the bead onto the background don't poison the color sample
+    pts = []
+    for i in range(10):
+        t = 0.2 + 0.6 * (i / 9)
+        x = round(x1 + (x2 - x1) * t); y = round(y1 + (y2 - y1) * t)
+        if 0 <= x < cols and 0 <= y < rows:
+            pts.append((x, y))
+    aa, bb = [], []
+    for x, y in pts:
+        patch = lab[max(0, y - 2):y + 3, max(0, x - 2):x + 3]
+        aa.extend(patch[:, :, 1].ravel()); bb.extend(patch[:, :, 2].ravel())
+    a0 = np.median(aa); b0 = np.median(bb)
 
-    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size_odd(d * 0.25))
-    binimg = cv2.morphologyEx(binimg, cv2.MORPH_OPEN, k_open)
-    binimg = cv2.morphologyEx(binimg, cv2.MORPH_CLOSE, k_close)
+    A = lab[:, :, 1].astype(np.float32); B = lab[:, :, 2].astype(np.float32)
+    chroma = np.sqrt((A - a0) ** 2 + (B - b0) ** 2)
+    mask = (chroma < CHROMA_T).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size_odd(d * 0.35),) * 2))
 
-    mask = np.zeros_like(binimg)
-    contours, _ = cv2.findContours(binimg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    min_area = 0.15 * single
-    for c in contours:
-        if cv2.contourArea(c) >= min_area:
-            cv2.drawContours(mask, [c], -1, 255, -1)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    votes = {}
+    for x, y in pts:
+        lb = int(labels[y, x])
+        if lb > 0:
+            votes[lb] = votes.get(lb, 0) + 1
+    if votes:
+        strand_label = max(votes, key=votes.get)
+    else:
+        strand_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    strand = (labels == strand_label).astype(np.uint8) * 255
 
-    fg_area = int(cv2.countNonZero(mask))
-    area_count = round(fg_area / single)
+    fg = int(cv2.countNonZero(strand))
+    area_count = round(fg / single)
 
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
-    k_peak = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, size_odd(d * 0.7))
-    dilated = cv2.dilate(dist, k_peak)
-    is_max = (dist >= dilated).astype(np.uint8) * 255
-    min_peak = max(1.0, 0.35 * radius)
-    dist_thresh = (dist > min_peak).astype(np.uint8) * 255
-    peaks = cv2.bitwise_and(is_max, dist_thresh)
+    dist = cv2.distanceTransform(strand, cv2.DIST_L2, 3)
+    k = size_odd(d * 0.6)
+    dil = cv2.dilate(dist, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    ismax = (dist >= dil).astype(np.uint8) * 255
+    peaks = cv2.bitwise_and(ismax, (dist > max(1, 0.3 * radius)).astype(np.uint8) * 255)
+    pn, _, _, pc = cv2.connectedComponentsWithStats(peaks, connectivity=8)
+    markers = [(pc[i, 0], pc[i, 1]) for i in range(1, pn)]
 
-    n, _, _, centroids = cv2.connectedComponentsWithStats(peaks, connectivity=8)
-    peak_count = n - 1
-    return peak_count, area_count, fg_area, single
+    if annot_path:
+        out = img_bgr.copy()
+        for (x, y) in markers:
+            cv2.circle(out, (int(x), int(y)), int(max(6, radius * 0.6)), (0, 255, 0), 3)
+        cv2.imwrite(annot_path, out)
+
+    return len(markers), area_count, fg
 
 
 if __name__ == "__main__":
-    cases = [("test/strand-42.png", 42, 44), ("test/strand-24.png", 24, 44)]
-    if len(sys.argv) > 1:
-        cases = [(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]))]
-    for path, truth, dia in cases:
-        img = cv2.imread(path)
-        peak, area, fg, single = count_beads(img, dia)
-        err = abs(peak - truth)
-        flag = "OK" if err <= 5 else "OFF"
-        print(f"{path}: true={truth}  peak={peak} (err {err}, {flag})  "
-              f"area={area}  fg_px={fg}  bead_px≈{single:.0f}")
+    if len(sys.argv) >= 6:
+        path = sys.argv[1]
+        line = tuple(float(v) for v in sys.argv[2:6])
+        annot = None
+        if "--annot" in sys.argv:
+            annot = sys.argv[sys.argv.index("--annot") + 1]
+        peak, area, fg = count_beads(cv2.imread(path), line, annot)
+        print(f"{path}: peak={peak}  area={area}  fg_px={fg}")
+    else:
+        print(__doc__)
