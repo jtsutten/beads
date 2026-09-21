@@ -21,6 +21,14 @@ beads** and get the **count**. Full spec: `.claude/plans/wild-purring-lark.md` (
   uniform** per strand. Beads **touch** on the strand. Up to ~70 beads.
 - **Accuracy target:** within ~5 of true count on a ~70-bead strand (~93%). A **manual
   tap-to-correct** step exists to close the last few, but auto-detection must get close.
+- **Must work on BUSY / TEXTURED backgrounds** — a wooden table with grain, a cluttered
+  workspace, etc. The user explicitly does **not** want to have to stage a clean, flat,
+  consistent background: *"i want this to work on a wooden table, or something with grain... the
+  workspace may be busy and it's hard to keep it perfectly flat background."* This is a
+  first-class requirement, not a nice-to-have. It **rules out** relying on a plain-background
+  capture protocol and is the strongest argument for object/segmentation-based detection (§5C)
+  over any global color/brightness thresholding: wood grain is warm-and-textured and will
+  defeat chroma thresholds, and clutter produces exactly the table false positives seen now.
 
 The user is a backend software engineer, **new to mobile dev**. That's why we chose a static
 PWA (web tech they know) over native — the "app" part is deliberately trivial; the hard part
@@ -112,7 +120,10 @@ table, each with a **true hand count**. Drop them in `work/` (gitignored). Exten
 `test/verify_pipeline.py` into a batch eval that prints error per image. Without this you're
 flying blind — the synthetic fixtures lie.
 
-**B. Cheap, high-value fixes within the current approach (try these first):**
+**B. Cheap, high-value fixes within the current approach (try these first — but note the
+busy-background requirement in §1 limits how far color-only methods can go; wood grain is
+warm and textured and a two-class color model will still leak. Collinearity gating (B2) is the
+background-agnostic win; the durable fix is likely §5C):**
 1. **Two-class color model (bead vs. background), not a one-sided threshold.** Sample the
    **background** color too — from image corners, and/or add a "tap the table" gesture — then
    classify each pixel to the *nearer* of {bead, background(s)} in Lab. This adapts to the
