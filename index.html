@@ -32,11 +32,13 @@
     <!-- STEP 2: calibrate --------------------------------------------- -->
     <section id="step-calibrate" class="step">
       <p class="hint">
-        <b>Calibrate:</b> drag a line across <b>one bead</b> — edge to edge — so I know
-        how big a bead is.
+        <b>Calibrate:</b> mark across <b>one bead</b> — tap one edge, then the other.
+        <b>Pinch to zoom in</b> first; the magnifier shows exactly where each end lands.
+        Drag a dot to nudge it.
       </p>
-      <div class="canvas-wrap">
+      <div class="canvas-wrap cal-wrap">
         <canvas id="calCanvas"></canvas>
+        <canvas id="loupe" class="loupe" width="140" height="140" hidden></canvas>
       </div>
       <div class="rowbtns">
         <button id="calRetake" class="btn">↩ Retake</button>

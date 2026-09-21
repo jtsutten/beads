@@ -1,21 +1,23 @@
 // Bead Counter — CV worker. Runs OpenCV (WASM) off the main thread.
 //
 // Message in:  { type:'count', imageData:ImageData, line:{x1,y1,x2,y2} }
-//   imageData : the photo at processing resolution (RGBA)
-//   line      : the calibration stroke the user drew across ONE bead, in that
-//               same image space. It gives us two things:
-//                 • bead size  = the stroke length (diameter in px)
-//                 • bead color = sampled along the stroke (Lab a/b)
-//                 • which strand to count = the blob the stroke sits on
+//   imageData : the photo at PROCESSING resolution (RGBA) — app.js already downscaled it
+//               to PROC_SIDE, so this worker does NOT resize.
+//   line      : the calibration stroke drawn across ONE bead, in that same image space.
+//               Gives bead width d (stroke length), a point on the strand (midpoint), and
+//               the strand orientation (strand axis ≈ perpendicular to the stroke).
 //
-// Approach (no training data; beads are uniform size on one strand):
-//   1. Learn the bead color from the stroke and segment by Lab-chroma distance
-//      — this ignores a differently-colored background (e.g. leather) far more
-//      robustly than brightness thresholding did.
-//   2. Keep ONLY the connected blob the stroke lies on = the strand. Cables,
-//      table specks, a plastic bag, etc. are separate blobs and get dropped.
-//   3. Count beads as distance-transform peaks within that strand.
+// Approach — corridor + centerline + pitch (mirrors test/verify_pipeline.py):
+//   1. Background colour model from patches beside the strand + image corners; a pixel is
+//      "strand" when it is far from EVERY background sample. Works for multi-colour strands
+//      (beads have no single colour, but the table does) and rejects busy backgrounds.
+//   2. Trace the strand CENTERLINE outward from the stroke midpoint, staying in a corridor
+//      around the strand — the busy background is never inspected.
+//   3. Count by PITCH: build a 1-D signal along the centerline (cross-strand width + mean L),
+//      find the dominant period by autocorrelation, count = arc_length / period. Robust to
+//      tiny beads (aggregates the whole strand) and to colour changes (keys on spacing).
 // Message out: { type:'result', markers:[{x,y}], peakCount, areaCount }
+//   areaCount here = the cross-check count from the 2nd-strongest signal (UI confidence hint).
 
 const OPENCV_URL = 'https://docs.opencv.org/4.9.0/opencv.js';
 
@@ -47,136 +49,240 @@ self.onmessage = (e) => {
   }
 };
 
-const CHROMA_T = 20;   // Lab a/b distance from the sampled bead color (bigger = more permissive)
+const BG_T = 22;    // Lab distance: a pixel farther than this from every background sample = strand
+const DS = 0.5;     // centerline resample spacing (px)
 
 function count(imageData, line) {
   const trash = [];
   const keep = (m) => (trash.push(m), m);
+  const done = (result) => { trash.forEach((m) => { try { m.delete(); } catch (_) {} }); return result; };
 
-  const d = Math.max(4, Math.hypot(line.x2 - line.x1, line.y2 - line.y1)); // bead diameter (px)
-  const radius = d / 2;
-  const singleBeadArea = Math.PI * radius * radius;
+  const d = Math.max(4, Math.hypot(line.x2 - line.x1, line.y2 - line.y1)); // bead width (px)
+  const L = Math.hypot(line.x2 - line.x1, line.y2 - line.y1) || 1;
+  const ux = (line.x2 - line.x1) / L, uy = (line.y2 - line.y1) / L;        // across-strand unit
+  const ax = -uy, ay = ux;                                                 // along-strand unit
+  const midx = (line.x1 + line.x2) / 2, midy = (line.y1 + line.y2) / 2;
 
-  const src = keep(cv.matFromImageData(imageData));      // RGBA
+  const src = keep(cv.matFromImageData(imageData));
   const rgb = keep(new cv.Mat());
   cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
   const lab = keep(new cv.Mat());
-  cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);               // 8U: L, a, b (a/b centered ~128)
-
+  cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab);          // 8U: L, a, b
   const rows = lab.rows, cols = lab.cols;
 
-  // --- sample points along the calibration stroke ----------------------
-  // Sample the INNER portion of the stroke (0.2..0.8): endpoints often overshoot
-  // the bead onto the background, and those would poison the color sample.
-  const pts = [];
-  const N = 9;
-  for (let i = 0; i <= N; i++) {
-    const t = 0.2 + 0.6 * (i / N);
-    const x = Math.round(line.x1 + (line.x2 - line.x1) * t);
-    const y = Math.round(line.y1 + (line.y2 - line.y1) * t);
-    if (x >= 0 && y >= 0 && x < cols && y < rows) pts.push([x, y]);
-  }
-  if (!pts.length) pts.push([Math.round((line.x1 + line.x2) / 2), Math.round((line.y1 + line.y2) / 2)]);
-
-  // median bead color (a,b) sampled from small patches along the stroke —
-  // patches (not single pixels) keep the sample robust to a slightly-off line.
-  const as = [], bs = [];
-  for (const [x, y] of pts) {
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const xx = x + dx, yy = y + dy;
-      if (xx >= 0 && yy >= 0 && xx < cols && yy < rows) {
-        const p = lab.ucharPtr(yy, xx); as.push(p[1]); bs.push(p[2]);
-      }
+  const labAt = (x, y) => {                          // median-ish Lab at rounded (x,y)
+    const xi = Math.round(x), yi = Math.round(y);
+    if (xi < 0 || yi < 0 || xi >= cols || yi >= rows) return null;
+    const p = lab.ucharPtr(yi, xi);
+    return [p[0], p[1], p[2]];
+  };
+  const patch = (x, y, rad) => {                     // median Lab over a small patch
+    const Ls = [], As = [], Bs = [];
+    for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) {
+      const s = labAt(x + dx, y + dy);
+      if (s) { Ls.push(s[0]); As.push(s[1]); Bs.push(s[2]); }
     }
-  }
-  const a0 = median(as), b0 = median(bs);
+    return Ls.length ? [median(Ls), median(As), median(Bs)] : null;
+  };
 
-  // --- segment by Lab-chroma distance to the bead color ----------------
+  // --- background colour references -------------------------------------
+  const bgRefs = [];
+  for (const k of [1.3, 1.7, 2.2]) for (const sgn of [1, -1]) {
+    const s = patch(midx + sgn * k * d * ux, midy + sgn * k * d * uy, 3);
+    if (s) bgRefs.push(s);
+  }
+  for (const [cx, cy] of [[6, 6], [cols - 7, 6], [6, rows - 7], [cols - 7, rows - 7],
+                          [(cols / 2) | 0, 6], [(cols / 2) | 0, rows - 7]]) {
+    const s = patch(cx, cy, 4);
+    if (s) bgRefs.push(s);
+  }
+  if (!bgRefs.length) bgRefs.push([240, 128, 128]);
+  const refs = dedupRefs(bgRefs, 6);                 // drop near-identical bg samples (fewer passes)
+
+  // --- strand mask: min SQUARED Lab distance to any background ref > BG_T² --
   const chans = new cv.MatVector();
   cv.split(lab, chans);
-  const aF = keep(new cv.Mat()), bF = keep(new cv.Mat());
-  chans.get(1).convertTo(aF, cv.CV_32F);
-  chans.get(2).convertTo(bF, cv.CV_32F);
+  const L32 = keep(new cv.Mat()), a32 = keep(new cv.Mat()), b32 = keep(new cv.Mat());
+  chans.get(0).convertTo(L32, cv.CV_32F);
+  chans.get(1).convertTo(a32, cv.CV_32F);
+  chans.get(2).convertTo(b32, cv.CV_32F);
   chans.delete();
-  const a0m = keep(matScalar(rows, cols, a0));
-  const b0m = keep(matScalar(rows, cols, b0));
-  cv.subtract(aF, a0m, aF);
-  cv.subtract(bF, b0m, bF);
-  cv.multiply(aF, aF, aF);
-  cv.multiply(bF, bF, bF);
-  const sum = keep(new cv.Mat());
-  cv.add(aF, bF, sum);
-  cv.sqrt(sum, sum);                                     // = chroma distance
-  const mask = keep(new cv.Mat());
-  cv.threshold(sum, mask, CHROMA_T, 255, cv.THRESH_BINARY_INV); // near bead color -> 255
-  mask.convertTo(mask, cv.CV_8U);
 
-  // clean: despeckle, then bridge the thin necks between touching beads
+  const minDist = keep(matScalar(rows, cols, 1e18)); // squared distance (no per-ref sqrt)
+  for (const [Lr, ar, br] of refs) {
+    const dl = new cv.Mat(), da = new cv.Mat(), db = new cv.Mat(), dsum = new cv.Mat();
+    const sL = matScalar(rows, cols, Lr), sa = matScalar(rows, cols, ar), sb = matScalar(rows, cols, br);
+    cv.subtract(L32, sL, dl); cv.multiply(dl, dl, dl);
+    cv.subtract(a32, sa, da); cv.multiply(da, da, da);
+    cv.subtract(b32, sb, db); cv.multiply(db, db, db);
+    cv.add(dl, da, dsum); cv.add(dsum, db, dsum);     // squared distance
+    cv.min(minDist, dsum, minDist);
+    dl.delete(); da.delete(); db.delete(); dsum.delete(); sL.delete(); sa.delete(); sb.delete();
+  }
+  const mask = keep(new cv.Mat());
+  const mtmp = new cv.Mat();
+  cv.threshold(minDist, mtmp, BG_T * BG_T, 255, cv.THRESH_BINARY);   // strand = 255
+  mtmp.convertTo(mask, cv.CV_8U);                    // fresh 8U mat (avoid in-place type change)
+  mtmp.delete();
   cv.morphologyEx(mask, mask, cv.MORPH_OPEN,
     keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3))));
   cv.morphologyEx(mask, mask, cv.MORPH_CLOSE,
-    keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, sizeOdd(d * 0.35))));
+    keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, sizeOdd(d * 0.3))));
 
-  // --- keep only the blob the stroke sits on = the strand --------------
-  const labels = keep(new cv.Mat());
-  const stats = keep(new cv.Mat());
-  const cents = keep(new cv.Mat());
-  const nLabels = cv.connectedComponentsWithStats(mask, labels, stats, cents, 8);
+  const mb = mask.data;                              // Uint8Array, row-major
+  const Ldata = new Uint8Array(rows * cols);         // L channel for the brightness signal
+  { const lc = new cv.Mat(); L32.convertTo(lc, cv.CV_8U); Ldata.set(lc.data); lc.delete(); }
+  const fg = (x, y) => {
+    const xi = Math.round(x), yi = Math.round(y);
+    return xi >= 0 && yi >= 0 && xi < cols && yi < rows && mb[yi * cols + xi] > 0;
+  };
 
-  // pick the label most of the stroke's sample points fall on
-  const votes = {};
-  for (const [x, y] of pts) {
-    const lb = labels.intAt(y, x);
-    if (lb > 0) votes[lb] = (votes[lb] || 0) + 1;
-  }
-  let strandLabel = 0, bestVotes = -1;
-  for (const k in votes) if (votes[k] > bestVotes) { bestVotes = votes[k]; strandLabel = +k; }
-  // fallback: if the stroke landed on holes, take the largest blob
-  if (!strandLabel) {
-    let bestArea = -1;
-    for (let i = 1; i < nLabels; i++) {
-      const area = stats.intAt(i, cv.CC_STAT_AREA);
-      if (area > bestArea) { bestArea = area; strandLabel = i; }
+  // --- centerline tracing ----------------------------------------------
+  const step = Math.max(1, d * 0.4);
+  const half = Math.max(2, Math.round(d * 1.2));
+  const offs = [];
+  for (let o = -half; o <= half; o++) offs.push(o);
+  const ci = offs.indexOf(0) < 0 ? (offs.length >> 1) : offs.indexOf(0);
+
+  const trace = (sign) => {
+    const nodes = [];
+    let px = midx, py = midy, dx = ax * sign, dy = ay * sign;
+    for (let s = 0; s < 6000; s++) {
+      const nx = px + dx * step, ny = py + dy * step;
+      const perpx = -dy, perpy = dx;
+      const vals = offs.map((o) => fg(nx + o * perpx, ny + o * perpy));
+      if (vals.reduce((a, v) => a + (v ? 1 : 0), 0) < 2) break;
+      const run = contiguous(vals, ci);
+      if (!run) break;
+      const [lo, hi] = run;
+      let coff = 0; for (let i = lo; i <= hi; i++) coff += offs[i]; coff /= (hi - lo + 1);
+      const width = hi - lo + 1;
+      const npx = nx + coff * perpx, npy = ny + coff * perpy;
+      if (npx < 0 || npy < 0 || npx >= cols || npy >= rows) break;
+      nodes.push([npx, npy, width]);
+      let ndx = npx - px, ndy = npy - py;
+      const nl = Math.hypot(ndx, ndy);
+      if (nl > 1e-6) {
+        dx = 0.5 * dx + 0.5 * (ndx / nl); dy = 0.5 * dy + 0.5 * (ndy / nl);
+        const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+      }
+      px = npx; py = npy;
     }
+    return nodes;
+  };
+
+  const back = trace(-1), fwd = trace(1);
+  const nodes = back.reverse().concat([[midx, midy, d]], fwd);
+  if (nodes.length < 3) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+
+  // --- resample to uniform arc length ----------------------------------
+  const arc = [0];
+  for (let i = 1; i < nodes.length; i++) {
+    arc.push(arc[i - 1] + Math.hypot(nodes[i][0] - nodes[i - 1][0], nodes[i][1] - nodes[i - 1][1]));
+  }
+  const Ltot = arc[arc.length - 1];
+  if (Ltot < d) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+
+  const nS = Math.floor(Ltot / DS);
+  const wsig = new Float64Array(nS), lsig = new Float64Array(nS);
+  const interpXY = (s) => {                          // point at arc length s
+    let i = 1; while (i < arc.length && arc[i] < s) i++;
+    if (i >= arc.length) i = arc.length - 1;
+    const t = (arc[i] - arc[i - 1]) > 1e-9 ? (s - arc[i - 1]) / (arc[i] - arc[i - 1]) : 0;
+    return [nodes[i - 1][0] + t * (nodes[i][0] - nodes[i - 1][0]),
+            nodes[i - 1][1] + t * (nodes[i][1] - nodes[i - 1][1]),
+            nodes[i - 1][2] + t * (nodes[i][2] - nodes[i - 1][2])];
+  };
+  for (let j = 0; j < nS; j++) {
+    const [x, y, w] = interpXY(j * DS);
+    wsig[j] = w;
+    const xi = Math.min(cols - 1, Math.max(0, Math.round(x)));
+    const yi = Math.min(rows - 1, Math.max(0, Math.round(y)));
+    lsig[j] = Ldata[yi * cols + xi];
   }
 
-  const strand = keep(new cv.Mat());
-  const labelMat = keep(matScalar(rows, cols, strandLabel, cv.CV_32S));
-  cv.compare(labels, labelMat, strand, cv.CMP_EQ);       // 8U, 255 on the strand
+  // --- pitch by autocorrelation ----------------------------------------
+  // signals that oscillate once per bead: L and (negated) width. |dL/ds| is NOT used — it
+  // has two edges per bead, so its fundamental is pitch/2 and would double the count.
+  const pmin = 0.55 * d / DS, pmax = 2.4 * d / DS;
+  const negW = wsig.map((v) => -v);
+  const cands = [];
+  for (const [name, sig] of [['width', negW], ['L', lsig]]) {
+    const [p, strength] = autocPeriod(sig, pmin, pmax);
+    if (p) cands.push([strength, p, name]);
+  }
+  if (!cands.length) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+  cands.sort((A, B) => B[0] - A[0]);
+  const pitch = cands[0][1] * DS;
+  const cnt = Math.max(1, Math.round(Ltot / pitch));
+  const alt = cands.length > 1 ? Math.round(Ltot / (cands[1][1] * DS)) : cnt;
 
-  const foregroundArea = cv.countNonZero(strand);
-  const areaCount = Math.round(foregroundArea / singleBeadArea);
-
-  // --- count beads = distance-transform peaks within the strand --------
-  const dist = keep(new cv.Mat());
-  cv.distanceTransform(strand, dist, cv.DIST_L2, 3);
-  const dilated = keep(new cv.Mat());
-  cv.dilate(dist, dilated, keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, sizeOdd(d * 0.6))));
-  const isMax = keep(new cv.Mat());
-  cv.compare(dist, dilated, isMax, cv.CMP_GE);
-  const distThresh = keep(new cv.Mat());
-  cv.threshold(dist, distThresh, Math.max(1, 0.3 * radius), 255, cv.THRESH_BINARY);
-  distThresh.convertTo(distThresh, cv.CV_8UC1);
-  const peaks = keep(new cv.Mat());
-  cv.bitwise_and(isMax, distThresh, peaks);
-
-  const pLabels = keep(new cv.Mat());
-  const pStats = keep(new cv.Mat());
-  const pCents = keep(new cv.Mat());
-  const nPeaks = cv.connectedComponentsWithStats(peaks, pLabels, pStats, pCents, 8);
+  // --- markers: evenly spaced along the centerline ---------------------
   const markers = [];
-  for (let i = 1; i < nPeaks; i++) {
-    markers.push({ x: pCents.doublePtr(i, 0)[0], y: pCents.doublePtr(i, 1)[0] });
+  for (let j = 0; j < cnt; j++) {
+    const [x, y] = interpXY((j + 0.5) * Ltot / cnt);
+    markers.push({ x, y });
   }
-
-  trash.forEach((m) => { try { m.delete(); } catch (_) {} });
-  return { type: 'result', markers, peakCount: markers.length, areaCount };
+  return done({ type: 'result', markers, peakCount: markers.length, areaCount: alt });
 }
 
-function matScalar(rows, cols, val, type) {
-  const m = new cv.Mat(rows, cols, type || cv.CV_32FC1);
+// --- plain-JS helpers (mirror verify_pipeline.py) --------------------------
+function autocPeriod(sig, pmin, pmax) {
+  const n = sig.length;
+  if (n < 2 * pmax) return [null, 0];
+  let mean = 0; for (let i = 0; i < n; i++) mean += sig[i]; mean /= n;
+  const s = new Float64Array(n);
+  let varsum = 0;
+  for (let i = 0; i < n; i++) { s[i] = sig[i] - mean; varsum += s[i] * s[i]; }
+  if (varsum < 1e-6) return [null, 0];
+  const lo = Math.max(1, Math.floor(pmin)), hi = Math.min(n - 2, Math.floor(pmax));
+  if (hi <= lo) return [null, 0];
+  const ac = new Float64Array(hi + 2);
+  const ac0 = varsum || 1e-9;
+  for (let lag = lo - 1; lag <= hi + 1; lag++) {
+    let sum = 0; for (let i = 0; i + lag < n; i++) sum += s[i] * s[i + lag];
+    ac[lag] = sum / ac0;
+  }
+  let gmax = 0; for (let k = lo; k <= hi; k++) if (ac[k] > gmax) gmax = ac[k];
+  if (gmax <= 0) return [null, 0];
+  const thresh = 0.5 * gmax;
+  let k = -1;
+  for (let j = lo; j <= hi; j++) {
+    if (ac[j] >= thresh && ac[j] >= ac[j - 1] && ac[j] >= ac[j + 1]) { k = j; break; }
+  }
+  if (k < 0) { k = lo; for (let j = lo; j <= hi; j++) if (ac[j] > ac[k]) k = j; }
+  while ((k >> 1) >= lo && ac[k >> 1] >= 0.55 * ac[k]) k = k >> 1;   // octave guard
+  const y0 = ac[k - 1], y1 = ac[k], y2 = ac[k + 1];
+  const denom = y0 - 2 * y1 + y2;
+  const delta = Math.abs(denom) > 1e-9 ? 0.5 * (y0 - y2) / denom : 0;
+  return [k + delta, ac[k]];
+}
+
+function contiguous(vals, ci) {
+  const n = vals.length;
+  if (!vals[ci]) {
+    let found = -1;
+    for (const off of [1, -1, 2, -2]) if (ci + off >= 0 && ci + off < n && vals[ci + off]) { found = ci + off; break; }
+    if (found < 0) return null;
+    ci = found;
+  }
+  let lo = ci, hi = ci;
+  while (lo - 1 >= 0 && vals[lo - 1]) lo--;
+  while (hi + 1 < n && vals[hi + 1]) hi++;
+  return [lo, hi];
+}
+
+function matScalar(rows, cols, val) {
+  const m = new cv.Mat(rows, cols, cv.CV_32FC1);
   m.setTo(new cv.Scalar(val));
   return m;
+}
+function dedupRefs(refs, tol) {
+  const out = [];
+  for (const r of refs) {
+    if (!out.some((o) => Math.hypot(o[0] - r[0], o[1] - r[1], o[2] - r[2]) < tol)) out.push(r);
+  }
+  return out;
 }
 function median(arr) {
   const s = arr.slice().sort((x, y) => x - y);

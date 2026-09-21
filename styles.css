@@ -62,7 +62,17 @@ label.btn { margin-top: 14px; }
   margin-top: 14px; border-radius: 14px; overflow: hidden; background: #0c0818;
   border: 1px solid #ffffff14; touch-action: none;
 }
+.cal-wrap { position: relative; }
 canvas { display: block; width: 100%; height: auto; }
+
+/* calibration magnifier loupe */
+.loupe {
+  position: absolute; top: 10px; left: 10px; width: 140px; height: 140px;
+  border-radius: 50%; border: 2px solid #ffffffcc; background: #0c0818;
+  box-shadow: 0 6px 20px #000000aa; pointer-events: none; z-index: 4;
+  image-rendering: pixelated;
+}
+.loupe.loupe--right { left: auto; right: 10px; }
 
 .readout { color: var(--muted); font-size: 13px; text-align: center; min-height: 18px; margin: 10px 0 0; }
 
