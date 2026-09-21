@@ -1,6 +1,6 @@
 // Bead Counter service worker — offline app shell + cached OpenCV runtime.
 // Bump CACHE when you change any shell file so clients pull the new version.
-const CACHE = 'beadcounter-v1';
+const CACHE = 'beadcounter-v2';
 
 const SHELL = [
   './',
