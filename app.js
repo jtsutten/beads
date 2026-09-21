@@ -2,7 +2,7 @@
 // Flow: capture photo → zoom/tap to calibrate one bead → CV worker detects beads →
 // review & tap-to-correct. Everything runs on-device; no network after load.
 
-const PROC_SIDE = 2400; // resolution handed to the CV worker (speed vs. accuracy)
+const PROC_SIDE = 3000; // resolution handed to the CV worker (speed vs. accuracy)
 const FULL_SIDE = 4096; // resolution retained purely so the calibrate loupe stays crisp
 
 const el = (id) => document.getElementById(id);
@@ -362,7 +362,7 @@ function renderResult() {
     ? `cross-check: ~${lastAreaCount} — double-check the markers`
     : (lastAreaCount != null ? `cross-check: ~${lastAreaCount}` : '');
   if (DEBUG() && lastDebug) {
-    note = `debug — d≈${lastDebug.dPx}px · mask ${lastDebug.fgPct}% · path ${(lastDebug.centerline || []).length}pts · cross-check ~${lastAreaCount}`;
+    note = `debug — d≈${lastDebug.dPx}px · pitch ${lastDebug.pitchPx ?? '?'} · nodes ${lastDebug.nodes} · raw-peaks ${lastDebug.rawPeaks ?? '?'} · len ${lastDebug.lenPx ?? '?'}`;
   }
   el('estNote').textContent = note;
 }

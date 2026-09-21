@@ -1,9 +1,42 @@
 # Bead Counter — Handoff
 
 **For:** the next session (a higher-capability model) picking up this project.
-**Status:** working PWA end-to-end, but the **counting accuracy is not good enough on real
-photos yet**. The detection approach needs a rethink — that's the main job. Read this whole
-doc, then see **"What to do next."**
+**Status:** working PWA end-to-end. Detector was reworked in session 3 (2026-09-21) and now
+works on the real tourmaline strand. **§3–§5 below describe the OLD (superseded) detector;
+read the update box first.**
+
+> ### ⏩ UPDATE 2026-09-21 (session 3) — detector rewritten, works on real photos
+> The old chroma-threshold/single-component/peak detector (§3) is **gone**. New detector
+> (`cv-worker.js`, mirrored in `test/verify_pipeline.py`), validated on the user's real
+> tourmaline photo (`work/tourmaline-orig.png`, ~10px beads) → **165** (hand count ~155–160),
+> markers ~one-per-bead. Was returning **0** before.
+>
+> **How it works (no global mask — light, scales to full res):**
+> 1. **Trace** the strand centerline out from the calibration stroke. Each step looks at a short
+>    perpendicular cross-section, estimates the **local fabric** colour from its outer ends
+>    (immune to global shading/folds — the thing that made global thresholds flood), and takes
+>    the near-centre run far from local fabric = strand here. Coasts through black beads / thread
+>    gaps via direction momentum.
+> 2. **Count = prominent peaks of the along-centerline colour GRADIENT** (= bead boundaries).
+>    Random multi-colour beads have *no periodic colour signal*, but the boundary gradient *is*
+>    periodic (pitch ~11px). Autocorrelation of the gradient gives pitch → sets peak min-spacing.
+>    Tail-trim drops isolated thread-tail peaks. `areaCount` = same with missed boundaries filled
+>    in (width-gated) = the UI "double-check" cross-check. Markers land on real boundaries.
+>
+> **Also new:** calibration is pinch-zoom + pan + **magnifier loupe + two-tap endpoints** (draw
+> across a tiny bead accurately); `PROC_SIDE=3000`; **`#debug`** URL overlays the centerline and
+> shows d/pitch/nodes. SW cache at **v5**.
+>
+> **Key lessons:** (a) chroma (Lab a,b) is shading-robust and separates colourful beads from
+> neutral fabric; L-distance floods on folds. (b) **RESOLUTION is the binding constraint** —
+> ~10px beads → exact (±5) counting is not achievable by any method; ~±10–15 is the ceiling.
+> Push the user to capture higher-res / in segments. (c) Do **not** pivot to ML: no training
+> data, SAM doesn't count touching beads, cloud APIs violate $0/on-device. EdgeSAM still
+> reserved only if a clean-background classical path proves insufficient.
+>
+> **Open:** waiting on the user's tap-correct feedback (systematically over/under?) to decide
+> whether to enable boundary-fill by default. Eval: `python3 test/verify_pipeline.py --batch DIR`
+> (photos `*_count-NN.jpg` + `DIR/lines.json`).
 
 ---
 
