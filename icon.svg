@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c4dff"/>
+      <stop offset="1" stop-color="#3a1d75"/>
+    </linearGradient>
+    <radialGradient id="bead" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.25" stop-color="#ffd1e6"/>
+      <stop offset="1" stop-color="#ff5c8a"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <path d="M96 300 Q256 200 416 300" fill="none" stroke="#ffffff55" stroke-width="10" stroke-linecap="round"/>
+  <g>
+    <circle cx="128" cy="286" r="42" fill="url(#bead)"/>
+    <circle cx="214" cy="256" r="42" fill="url(#bead)"/>
+    <circle cx="300" cy="256" r="42" fill="url(#bead)"/>
+    <circle cx="386" cy="286" r="42" fill="url(#bead)"/>
+  </g>
+</svg>

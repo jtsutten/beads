@@ -1,0 +1,14 @@
+{
+  "name": "Bead Counter",
+  "short_name": "Beads",
+  "description": "Count beads on a strand from a photo — runs entirely on your phone.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#140d24",
+  "theme_color": "#1b1230",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

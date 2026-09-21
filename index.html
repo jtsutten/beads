@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#1b1230" />
+  <title>Bead Counter</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Bead&nbsp;Counter</h1>
+    <span id="cvStatus" class="status status--loading">loading CV…</span>
+  </header>
+
+  <main id="app">
+    <!-- STEP 1: capture ------------------------------------------------ -->
+    <section id="step-capture" class="step is-active">
+      <p class="hint">
+        Lay the strand roughly straight on a <b>plain, contrasting</b> background,
+        with even light, and shoot from directly above.
+      </p>
+      <label class="btn btn--primary">
+        📷 Take / choose photo
+        <input id="fileInput" type="file" accept="image/*" capture="environment" hidden />
+      </label>
+    </section>
+
+    <!-- STEP 2: calibrate --------------------------------------------- -->
+    <section id="step-calibrate" class="step">
+      <p class="hint">
+        <b>Calibrate:</b> drag a line across <b>one bead</b> — edge to edge — so I know
+        how big a bead is.
+      </p>
+      <div class="canvas-wrap">
+        <canvas id="calCanvas"></canvas>
+      </div>
+      <div class="rowbtns">
+        <button id="calRetake" class="btn">↩ Retake</button>
+        <button id="calCount" class="btn btn--primary" disabled>Count beads →</button>
+      </div>
+      <p id="calReadout" class="readout"></p>
+    </section>
+
+    <!-- STEP 3: review + correct -------------------------------------- -->
+    <section id="step-result" class="step">
+      <div class="countbar">
+        <div class="count" id="countBig">–</div>
+        <div class="count-sub">
+          <span id="countLabel">beads</span>
+          <span id="estNote" class="est"></span>
+        </div>
+      </div>
+      <p class="hint">
+        Tap an empty spot to <b>add</b> a bead, or tap a marker to <b>remove</b> it.
+      </p>
+      <div class="canvas-wrap">
+        <canvas id="resCanvas"></canvas>
+      </div>
+      <div class="rowbtns">
+        <button id="resRestart" class="btn">↩ New photo</button>
+        <button id="resRecount" class="btn">↻ Re-detect</button>
+      </div>
+    </section>
+
+    <div id="spinner" class="spinner" hidden><div class="spin"></div><span>Counting…</span></div>
+  </main>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
