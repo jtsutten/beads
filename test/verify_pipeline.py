@@ -140,8 +140,8 @@ def count_beads(img_bgr, line, annot_path=None, proc_side=PROC_SIDE, debug=False
     bead_mean = np.median(bead_samples, axis=0) if bead_samples else np.array([128, 128, 128.])
 
     bg_refs = []
-    for k in (1.3, 1.7, 2.2):                             # patches beside the strand
-        for sgn in (1, -1):
+    for k in (1.6, 2.2, 3.0):                             # patches beside the strand (far enough
+        for sgn in (1, -1):                              # to clear tiny strands)
             s = _patch_lab(lab, mid[0] + sgn * k * d * ux, mid[1] + sgn * k * d * uy, rad=3)
             if s is not None:
                 bg_refs.append(s)
@@ -151,15 +151,21 @@ def count_beads(img_bgr, line, annot_path=None, proc_side=PROC_SIDE, debug=False
         if s is not None:
             bg_refs.append(s)
     bg_refs = _dedup_refs(bg_refs, 6.0) if bg_refs else [np.array([240, 128, 128.])]
+    # drop any "background" sample that is actually bead-coloured (patch landed on the strand),
+    # else the beads get labelled background and the mask comes back empty
+    kept = [r for r in bg_refs if np.linalg.norm(r - bead_mean) > 15]
+    if kept:
+        bg_refs = kept
 
-    # a pixel is strand if it is far from EVERY background reference colour (squared dist)
+    # strand = far from EVERY background ref  OR  close to the bead colour (rescue)
     flat = lab.reshape(-1, 3)
     dist2 = np.full(flat.shape[0], 1e18, np.float32)
     for ref in bg_refs:
         dist2 = np.minimum(dist2, ((flat - ref) ** 2).sum(axis=1))
     dist2 = dist2.reshape(rows, cols)
-    BG_T = 22.0
-    mask = (dist2 > BG_T * BG_T).astype(np.uint8) * 255
+    dist2_bead = ((lab - bead_mean) ** 2).sum(axis=2)
+    BG_T, BEAD_T = 22.0, 20.0
+    mask = ((dist2 > BG_T * BG_T) | (dist2_bead < BEAD_T * BEAD_T)).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     kc = max(3, int(round(d * 0.3)) | 1)

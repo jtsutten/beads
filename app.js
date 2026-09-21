@@ -25,6 +25,8 @@ const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
 let diameter = 0;           // bead diameter in proc pixels
 let markers = [];           // [{x,y}] in proc pixels
 let lastAreaCount = null;
+let lastDebug = null;       // { fgCount, fgPct, dPx, centerline } from the worker (for #debug)
+const DEBUG = () => location.hash.toLowerCase().includes('debug');
 
 // --- CV worker -------------------------------------------------------------
 let worker;
@@ -43,6 +45,7 @@ function initWorker() {
       el('spinner').hidden = true;
       markers = m.markers.map((p) => ({ x: p.x, y: p.y }));
       lastAreaCount = m.areaCount;
+      lastDebug = m.debug || null;
       renderResult();
       showStep('result');
     } else if (m.type === 'error') {
@@ -341,11 +344,26 @@ function renderResult() {
     resCtx.arc(m.x, m.y, resCtx.lineWidth * 0.9, 0, Math.PI * 2);
     resCtx.fill();
   }
+  if (DEBUG() && lastDebug) {
+    // draw the traced centerline so we can see what the detector followed
+    const cl = lastDebug.centerline || [];
+    if (cl.length > 1) {
+      resCtx.strokeStyle = '#ffd23f';
+      resCtx.lineWidth = Math.max(2, diameter / 10);
+      resCtx.beginPath();
+      resCtx.moveTo(cl[0].x, cl[0].y);
+      for (const p of cl) resCtx.lineTo(p.x, p.y);
+      resCtx.stroke();
+    }
+  }
   el('countBig').textContent = markers.length;
   el('countLabel').textContent = markers.length === 1 ? 'bead' : 'beads';
-  const note = (lastAreaCount != null && Math.abs(lastAreaCount - markers.length) >= 3)
+  let note = (lastAreaCount != null && Math.abs(lastAreaCount - markers.length) >= 3)
     ? `cross-check: ~${lastAreaCount} — double-check the markers`
     : (lastAreaCount != null ? `cross-check: ~${lastAreaCount}` : '');
+  if (DEBUG() && lastDebug) {
+    note = `debug — d≈${lastDebug.dPx}px · mask ${lastDebug.fgPct}% · path ${(lastDebug.centerline || []).length}pts · cross-check ~${lastAreaCount}`;
+  }
   el('estNote').textContent = note;
 }
 

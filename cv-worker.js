@@ -50,6 +50,7 @@ self.onmessage = (e) => {
 };
 
 const BG_T = 22;    // Lab distance: a pixel farther than this from every background sample = strand
+const BEAD_T = 20;  // Lab distance: a pixel closer than this to the bead colour = strand (rescue)
 const DS = 0.5;     // centerline resample spacing (px)
 
 function count(imageData, line) {
@@ -85,9 +86,20 @@ function count(imageData, line) {
     return Ls.length ? [median(Ls), median(As), median(Bs)] : null;
   };
 
+  // --- bead colour (median Lab along the inner stroke) ------------------
+  const beadS = [];
+  for (let i = 0; i <= 9; i++) {
+    const t = 0.2 + 0.6 * (i / 9);
+    const s = patch(line.x1 + (line.x2 - line.x1) * t, line.y1 + (line.y2 - line.y1) * t, 2);
+    if (s) beadS.push(s);
+  }
+  const beadMean = beadS.length
+    ? [median(beadS.map((v) => v[0])), median(beadS.map((v) => v[1])), median(beadS.map((v) => v[2]))]
+    : [128, 128, 128];
+
   // --- background colour references -------------------------------------
   const bgRefs = [];
-  for (const k of [1.3, 1.7, 2.2]) for (const sgn of [1, -1]) {
+  for (const k of [1.6, 2.2, 3.0]) for (const sgn of [1, -1]) {   // far enough to clear tiny strands
     const s = patch(midx + sgn * k * d * ux, midy + sgn * k * d * uy, 3);
     if (s) bgRefs.push(s);
   }
@@ -97,7 +109,10 @@ function count(imageData, line) {
     if (s) bgRefs.push(s);
   }
   if (!bgRefs.length) bgRefs.push([240, 128, 128]);
-  const refs = dedupRefs(bgRefs, 6);                 // drop near-identical bg samples (fewer passes)
+  // drop any "background" sample that is actually bead-coloured (a patch that landed on the
+  // strand) — otherwise the beads get classified as background and the mask comes back empty.
+  let refs = dedupRefs(bgRefs, 6).filter((r) => Math.hypot(r[0] - beadMean[0], r[1] - beadMean[1], r[2] - beadMean[2]) > 15);
+  if (!refs.length) refs = dedupRefs(bgRefs, 6);
 
   // --- strand mask: min SQUARED Lab distance to any background ref > BG_T² --
   const chans = new cv.MatVector();
@@ -119,16 +134,39 @@ function count(imageData, line) {
     cv.min(minDist, dsum, minDist);
     dl.delete(); da.delete(); db.delete(); dsum.delete(); sL.delete(); sa.delete(); sb.delete();
   }
+  // distance² to the bead colour, so "near bead" can rescue the strand
+  const distBead = keep(new cv.Mat());
+  {
+    const dl = new cv.Mat(), da = new cv.Mat(), db = new cv.Mat();
+    const sL = matScalar(rows, cols, beadMean[0]), sa = matScalar(rows, cols, beadMean[1]), sb = matScalar(rows, cols, beadMean[2]);
+    cv.subtract(L32, sL, dl); cv.multiply(dl, dl, dl);
+    cv.subtract(a32, sa, da); cv.multiply(da, da, da);
+    cv.subtract(b32, sb, db); cv.multiply(db, db, db);
+    cv.add(dl, da, distBead); cv.add(distBead, db, distBead);
+    dl.delete(); da.delete(); db.delete(); sL.delete(); sa.delete(); sb.delete();
+  }
+
+  // strand = far from EVERY background ref  OR  close to the bead colour
   const mask = keep(new cv.Mat());
-  const mtmp = new cv.Mat();
-  cv.threshold(minDist, mtmp, BG_T * BG_T, 255, cv.THRESH_BINARY);   // strand = 255
-  mtmp.convertTo(mask, cv.CV_8U);                    // fresh 8U mat (avoid in-place type change)
-  mtmp.delete();
+  const bgM = new cv.Mat(), beadM = new cv.Mat();
+  cv.threshold(minDist, bgM, BG_T * BG_T, 255, cv.THRESH_BINARY);
+  cv.threshold(distBead, beadM, BEAD_T * BEAD_T, 255, cv.THRESH_BINARY_INV);
+  const bg8 = new cv.Mat(), bead8 = new cv.Mat();
+  bgM.convertTo(bg8, cv.CV_8U); beadM.convertTo(bead8, cv.CV_8U);
+  cv.bitwise_or(bg8, bead8, mask);
+  bgM.delete(); beadM.delete(); bg8.delete(); bead8.delete();
   cv.morphologyEx(mask, mask, cv.MORPH_OPEN,
     keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3, 3))));
   cv.morphologyEx(mask, mask, cv.MORPH_CLOSE,
     keep(cv.getStructuringElement(cv.MORPH_ELLIPSE, sizeOdd(d * 0.3))));
 
+  const fgCount = cv.countNonZero(mask);
+  const dbg = (ns) => {                              // diagnostics for the #debug overlay
+    const arr = ns || [], out = [];
+    const stepN = Math.max(1, Math.floor(arr.length / 200));
+    for (let i = 0; i < arr.length; i += stepN) out.push({ x: Math.round(arr[i][0]), y: Math.round(arr[i][1]) });
+    return { fgCount, fgPct: +(100 * fgCount / (rows * cols)).toFixed(1), dPx: Math.round(d), centerline: out };
+  };
   const mb = mask.data;                              // Uint8Array, row-major
   const Ldata = new Uint8Array(rows * cols);         // L channel for the brightness signal
   { const lc = new cv.Mat(); L32.convertTo(lc, cv.CV_8U); Ldata.set(lc.data); lc.delete(); }
@@ -173,7 +211,7 @@ function count(imageData, line) {
 
   const back = trace(-1), fwd = trace(1);
   const nodes = back.reverse().concat([[midx, midy, d]], fwd);
-  if (nodes.length < 3) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+  if (nodes.length < 3) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0, debug: dbg(nodes) });
 
   // --- resample to uniform arc length ----------------------------------
   const arc = [0];
@@ -181,7 +219,7 @@ function count(imageData, line) {
     arc.push(arc[i - 1] + Math.hypot(nodes[i][0] - nodes[i - 1][0], nodes[i][1] - nodes[i - 1][1]));
   }
   const Ltot = arc[arc.length - 1];
-  if (Ltot < d) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+  if (Ltot < d) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0, debug: dbg(nodes) });
 
   const nS = Math.floor(Ltot / DS);
   const wsig = new Float64Array(nS), lsig = new Float64Array(nS);
@@ -211,7 +249,7 @@ function count(imageData, line) {
     const [p, strength] = autocPeriod(sig, pmin, pmax);
     if (p) cands.push([strength, p, name]);
   }
-  if (!cands.length) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0 });
+  if (!cands.length) return done({ type: 'result', markers: [], peakCount: 0, areaCount: 0, debug: dbg(nodes) });
   cands.sort((A, B) => B[0] - A[0]);
   const pitch = cands[0][1] * DS;
   const cnt = Math.max(1, Math.round(Ltot / pitch));
@@ -223,7 +261,7 @@ function count(imageData, line) {
     const [x, y] = interpXY((j + 0.5) * Ltot / cnt);
     markers.push({ x, y });
   }
-  return done({ type: 'result', markers, peakCount: markers.length, areaCount: alt });
+  return done({ type: 'result', markers, peakCount: markers.length, areaCount: alt, debug: dbg(nodes) });
 }
 
 // --- plain-JS helpers (mirror verify_pipeline.py) --------------------------
